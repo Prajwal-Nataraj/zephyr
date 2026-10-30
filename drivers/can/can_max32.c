@@ -529,13 +529,48 @@ static void can_max32_rx_soft_filter(const struct device *dev, struct can_frame 
 	}
 }
 
+/* Debug counters: inspect via debugger to locate where CAN reception stops. */		//-----Extra
+volatile uint32_t can_max32_rx_count;						//-----Extra
+volatile uint32_t can_max32_rx_overrun_count;				//-----Extra
+volatile bool canOverRun = false;							//-----Extra
+volatile uint32_t can_max32_unit_event_count;				//-----Extra
+volatile uint32_t can_max32_last_unit_event = 0xFFFFFFFFU;	//-----Extra
+
+/*
+ * The controller raises a single RX event even when several frames are already queued, and it
+ * stops raising new ones while frames remain pending, so unread frames stall reception for good.
+ */
+static void can_max32_rx_drain(const struct device *dev)
+{
+	const struct max32_can_config *dev_cfg = dev->config;
+	struct max32_can_data *dev_data = dev->data;
+	struct max32_req_data *rx = &dev_data->rx_data;
+	struct can_frame msg;
+	unsigned int limit = MAX32_CAN_DRIVER_RXTX_BUF_SIZE;
+
+	while ((dev_cfg->can->rxdcnt != 0U) && (limit-- > 0U)) {
+		if (MXC_CAN_ReadRXFIFO(dev_cfg->can_id, &rx->info, rx->buf, sizeof(rx->buf)) < 0) {
+			break;
+		}
+
+		can_max32_rx_count++;
+
+		can_max32_convert_req_to_canframe(&rx->req, &msg);
+		can_max32_rx_soft_filter(dev, &msg);
+	}
+}
+
 void can_max32_rx_handler(const struct device *dev)
 {
 	struct max32_can_data *dev_data = dev->data;
 	struct can_frame msg;
 
+	can_max32_rx_count++;
+
 	can_max32_convert_req_to_canframe(&dev_data->rx_data.req, &msg);
 	can_max32_rx_soft_filter(dev, &msg);
+
+	can_max32_rx_drain(dev);
 }
 
 void can_max32_tx_handler(const struct device *dev, int status)
@@ -570,6 +605,12 @@ void object_event_callback(uint32_t can_idx, uint32_t event)
 	if (event == MXC_CAN_OBJ_EVT_RX) { /* Message receive complete */
 		can_max32_rx_handler(dev);
 	}
+
+	if (event == MXC_CAN_OBJ_EVT_RX_OVERRUN) {
+		canOverRun = true;
+		can_max32_rx_overrun_count++;									//-----Extra
+		can_max32_rx_drain(dev);
+	}
 }
 
 void unit_event_callback(uint32_t can_idx, uint32_t event)
@@ -577,6 +618,9 @@ void unit_event_callback(uint32_t can_idx, uint32_t event)
 	const struct device *dev = dev_list[can_idx];
 	struct max32_can_data *dev_data = dev->data;
 	enum can_state old_state = dev_data->state;
+
+	can_max32_unit_event_count++;										//-----Extra
+	can_max32_last_unit_event = event;									//-----Extra
 
 	switch (event) {
 	case MXC_CAN_UNIT_EVT_INACTIVE:
